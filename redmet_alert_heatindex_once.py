@@ -149,10 +149,10 @@ def main():
     base_ws = env("REDMET_BASE", "https://redmet.icc.org.gt/ws")
     heat_index_threshold = float(env("HEAT_INDEX_THRESHOLD", "10"))
 
-    slot_minutes = int(env("SLOT_MINUTES", "15"))
-    max_age_min = int(env("MAX_AGE_MIN", "45"))
-    lookback_hours = int(env("LOOKBACK_HOURS", "6"))
-    suppress_if_older_than_min = int(env("SUPPRESS_IF_OLDER_THAN_MIN", "90"))
+    slot_minutes = int(env("SLOT_MINUTES") or "15")
+    max_age_min = int(env("MAX_AGE_MIN") or "45")
+    lookback_hours = int(env("LOOKBACK_HOURS") or "6")
+    suppress_if_older_than_min = int(env("SUPPRESS_IF_OLDER_THAN_MIN") or "90")
 
     now_local = datetime.now()
     slots, _ = build_slots(now_local, slot_minutes, max_age_min)
@@ -215,3 +215,4 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
