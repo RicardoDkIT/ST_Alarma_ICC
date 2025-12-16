@@ -91,26 +91,23 @@ def get_station_records(base_ws: str, estacionid: str, fechaini: str, fechafin: 
     r.raise_for_status()
     data = r.json()
 
-    # Expected format: {"1":[{...},{...}]}
     if isinstance(data, dict):
-        recs = data.get(str(estacionid), [])
-        return recs if isinstance(recs, list) else []
+        return data.get(str(estacionid), []) or []
+
     if isinstance(data, list):
         return data
+
     return []
 
 
 def pick_heatindex_record(records: list[dict], slots: list[datetime], slot_minutes: int):
-    """
-    Pick the most recent record whose 'fecha' lands on any allowed slot,
-    with numeric indice_calor. Also extract temperatura if present.
-    """
     by_slot = {}
 
     for rec in records:
         fecha = rec.get("fecha")
         if not isinstance(fecha, str):
             continue
+
         dt = parse_api_dt(fecha)
         if not dt:
             continue
@@ -123,7 +120,7 @@ def pick_heatindex_record(records: list[dict], slots: list[datetime], slot_minut
         t_val = safe_float(rec.get("temperatura"))  # info only
         by_slot[rec_slot] = (rec, hi_val, t_val, dt)
 
-    for slot in slots:  # newest -> oldest
+    for slot in slots:
         if slot in by_slot:
             rec, hi_val, t_val, dt_api = by_slot[slot]
             return rec, hi_val, t_val, dt_api, slot
@@ -135,33 +132,26 @@ def pick_heatindex_record(records: list[dict], slots: list[datetime], slot_minut
 # Main (single run)
 # ----------------------------
 def main():
-    # Required
     telegram_token = env("TELEGRAM_TOKEN")
-    chat_ids_raw = env("TELEGRAM_CHAT_IDS")  # comma-separated: "833...,112..."
+    chat_id_raw = env("CHAT_ID")
+
     redmet_user = env("REDMET_USER")
     redmet_pass = env("REDMET_PASS")
     lat = env("LAT")
     lon = env("LON")
 
-    if not all([telegram_token, chat_ids_raw, redmet_user, redmet_pass, lat, lon]):
-        print("ERROR: Missing required env vars: TELEGRAM_TOKEN, TELEGRAM_CHAT_IDS, REDMET_USER, REDMET_PASS, LAT, LON", file=sys.stderr)
+    if not all([telegram_token, chat_id_raw, redmet_user, redmet_pass, lat, lon]):
+        print("ERROR: Missing required secrets.", file=sys.stderr)
         return 2
 
-    chat_ids = [c.strip() for c in chat_ids_raw.split(",") if c.strip()]
-    if not chat_ids:
-        print("ERROR: TELEGRAM_CHAT_IDS is empty after parsing.", file=sys.stderr)
-        return 2
+    chat_ids = [c.strip() for c in chat_id_raw.split(",") if c.strip()]
 
-    # Optional settings
     base_ws = env("REDMET_BASE", "https://redmet.icc.org.gt/ws")
-    heat_index_threshold = float(env("HEAT_INDEX_THRESHOLD", "10.0"))
+    heat_index_threshold = float(env("HEAT_INDEX_THRESHOLD", "10"))
 
     slot_minutes = int(env("SLOT_MINUTES", "15"))
     max_age_min = int(env("MAX_AGE_MIN", "45"))
     lookback_hours = int(env("LOOKBACK_HOURS", "6"))
-
-    # Extra safety to avoid repeated alerts on “stuck” data:
-    # if record is older than this, we skip alerting entirely.
     suppress_if_older_than_min = int(env("SUPPRESS_IF_OLDER_THAN_MIN", "90"))
 
     now_local = datetime.now()
@@ -170,74 +160,56 @@ def main():
     fechaini = (now_local - timedelta(hours=lookback_hours)).strftime("%Y-%m-%d %H:%M")
     fechafin = now_local.strftime("%Y-%m-%d %H:%M")
 
-    # 1) nearest stations
     estaciones = get_nearest_stations(base_ws, lat, lon, redmet_user, redmet_pass)
     if not estaciones:
-        print("INFO: No nearest stations returned.")
+        print("INFO: No stations found.")
         return 0
 
     chosen = None
 
-    # 2) try station 1, then 2, then 3 (no averaging)
     for sta in estaciones[:3]:
         estacionid = sta.get("estacionid")
         if not estacionid:
             continue
 
         records = get_station_records(base_ws, str(estacionid), fechaini, fechafin, redmet_user, redmet_pass)
-        if not records:
-            continue
-
         rec, hi_val, t_val, dt_api, slot_used = pick_heatindex_record(records, slots, slot_minutes)
         if rec is None:
             continue
 
         age_min = (now_local - dt_api).total_seconds() / 60.0
-        chosen = (sta, rec, hi_val, t_val, dt_api, slot_used, age_min)
+        chosen = (sta, hi_val, t_val, age_min, slot_used, rec.get("fecha"))
         break
 
     if not chosen:
-        print("INFO: No valid indice_calor found for slots in the nearest 3 stations.")
+        print("INFO: No valid heat index found.")
         return 0
 
-    sta, rec, hi_val, t_val, dt_api, slot_used, age_min = chosen
+    sta, hi_val, t_val, age_min, slot_used, fecha_api = chosen
 
-    codigo = sta.get("codigo", "")
-    finca = sta.get("finca", "")
-    dist = sta.get("distancia", "")
-    fecha_api = rec.get("fecha", "")
-
-    print(
-        f"DEBUG: station={codigo} dist_km={dist} indice_calor={hi_val} temp={t_val} "
-        f"fecha_api={fecha_api} slot={slot_used.strftime('%Y-%m-%d %H:%M:%S')} age_min={round(age_min,1)}"
-    )
-
-    # Safety: skip very old readings to reduce repeats if API is delayed/stuck
     if age_min > suppress_if_older_than_min:
-        print(f"INFO: Reading too old ({round(age_min,1)} min) > SUPPRESS_IF_OLDER_THAN_MIN={suppress_if_older_than_min}. Skipping alert.")
+        print("INFO: Data too old, skipping alert.")
         return 0
 
-    # Trigger ONLY on heat index
     if hi_val <= heat_index_threshold:
-        print(f"INFO: No alert. indice_calor={hi_val} <= threshold={heat_index_threshold}")
+        print("INFO: No alert condition met.")
         return 0
 
     temp_txt = "NA" if t_val is None else f"{t_val:.1f} °C"
 
-    # Use HTML (stable bold)
     msg = (
         "🚨 <b>ALERTA DE SENSACIÓN TÉRMICA</b>\n\n"
-        f"🏭 <b>ESTACIÓN UTILIZADA:</b> {codigo} - {finca}\n"
-        f"📏 <b>DISTANCIA:</b> {dist} km\n"
+        f"🏭 <b>ESTACIÓN UTILIZADA:</b> {sta.get('codigo')} - {sta.get('finca')}\n"
+        f"📏 <b>DISTANCIA:</b> {sta.get('distancia')} km\n"
         f"🌡️ <b>TEMPERATURA:</b> {temp_txt}\n"
-        f"🔥 <b>SENSACIÓN TÉRMICA:</b> {hi_val:.1f} °C (umbral &gt; {heat_index_threshold:.1f} °C)\n"
+        f"🔥 <b>SENSACIÓN TÉRMICA:</b> {hi_val:.1f} °C (umbral &gt; {heat_index_threshold} °C)\n"
         f"🕒 <b>FECHA API CONSULTA:</b> {fecha_api}\n"
         f"⏱️ <b>RETRASO:</b> {round(age_min,1)} min\n\n"
         "📡 <b>FUENTE:</b> REDMET ICC"
     )
 
     send_telegram_html(telegram_token, chat_ids, msg)
-    print("INFO: Alert sent to Telegram.")
+    print("INFO: Alert sent.")
     return 0
 
 
