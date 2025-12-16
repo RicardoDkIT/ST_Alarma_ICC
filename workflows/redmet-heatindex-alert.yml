@@ -1,0 +1,42 @@
+name: REDMET Heat Index Alert (every 30 min)
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # every 30 minutes (UTC)
+  workflow_dispatch:          # lets you run it manually from GitHub UI
+
+jobs:
+  run-alert:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Run REDMET alert script
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          REDMET_USER: ${{ secrets.REDMET_USER }}
+          REDMET_PASS: ${{ secrets.REDMET_PASS }}
+          LAT: ${{ secrets.LAT }}
+          LON: ${{ secrets.LON }}
+          REDMET_BASE: ${{ secrets.REDMET_BASE }}
+          HEAT_INDEX_THRESHOLD: ${{ secrets.HEAT_INDEX_THRESHOLD }}
+          # Optional tuning (defaults in code if not set)
+          SLOT_MINUTES: ${{ secrets.SLOT_MINUTES }}
+          MAX_AGE_MIN: ${{ secrets.MAX_AGE_MIN }}
+          LOOKBACK_HOURS: ${{ secrets.LOOKBACK_HOURS }}
+          SUPPRESS_IF_OLDER_THAN_MIN: ${{ secrets.SUPPRESS_IF_OLDER_THAN_MIN }}
+        run: |
+          python redmet_alert_heatindex_once.py
